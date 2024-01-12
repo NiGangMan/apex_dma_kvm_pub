@@ -509,22 +509,20 @@ impl Aimbot {
         if !self.is_triggerbot_ready() || !aim_angles.valid {
             return 0;
         }
-        let trigger_threshold =
-            lock_mod!().triggerbot_threshold_fov(self.weapon_zoom_fov, aim_angles.distance);
-        let cross_hair_ready = {
-            if aim_angles.delta_pitch_min == aim_angles.delta_pitch_max {
-                aim_angles.delta_pitch.abs() < trigger_threshold
-                    && aim_angles.delta_yew.abs() < trigger_threshold
-            } else {
-                (aim_angles.delta_pitch_min * aim_angles.delta_pitch_max < 0.0
-                    && aim_angles.delta_yew.abs() < trigger_threshold)
-                    || (aim_angles.delta_pitch_max.powi(2) / 2.5
-                        + aim_angles.delta_yew_max.powi(2) / 1.2)
-                        .sqrt()
-                        < trigger_threshold
-            }
-        };
-        if cross_hair_ready {
+
+        if lock_mod!().triggerbot_cross_hair_ready(
+            aim_angles.view_pitch,
+            aim_angles.view_yew,
+            aim_angles.delta_pitch,
+            aim_angles.delta_yew,
+            aim_angles.delta_pitch_min,
+            aim_angles.delta_pitch_max,
+            aim_angles.delta_yew_min,
+            aim_angles.delta_yew_max,
+            aim_angles.distance,
+            self.weapon_zoom_fov,
+        ) > 0
+        {
             rand::thread_rng().gen_range(40..100)
         } else {
             0
@@ -533,14 +531,27 @@ impl Aimbot {
 
     pub fn smooth_aim_angles(&self, aim_angles: &AimAngles, smooth_factor: f32) -> (f32, f32) {
         assert!(aim_angles.valid);
+
         let smooth = if self.weapon_grenade {
             self.settings.skynade_smooth
         } else {
             self.settings.smooth
-        };
+        } / smooth_factor;
+
+        let mut sm = lock_mod!();
         (
-            aim_angles.view_pitch + aim_angles.delta_pitch / smooth * smooth_factor,
-            aim_angles.view_yew + aim_angles.delta_yew / smooth * smooth_factor,
+            sm.aimbot_smooth_x(
+                self.aim_entity as i64,
+                aim_angles.view_pitch,
+                aim_angles.delta_pitch,
+                smooth,
+            ),
+            sm.aimbot_smooth_y(
+                self.aim_entity as i64,
+                aim_angles.view_yew,
+                aim_angles.delta_yew,
+                smooth,
+            ),
         )
     }
 }
@@ -642,10 +653,9 @@ fn get_unix_timestamp_in_millis() -> u64 {
             let millis = duration.as_secs() * 1000 + duration.subsec_millis() as u64;
             millis
         }
-        Err(_) => {
+        Err(e) => {
             // Handle errors, such as clock rollback
-            eprintln!("Error getting Unix Timestamp");
-            0 // or return a default value, depending on your needs
+            panic!("Error getting Unix Timestamp: {}", e);
         }
     }
 }
