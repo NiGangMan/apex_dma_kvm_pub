@@ -1,10 +1,13 @@
+mod apexdream;
 pub mod ffi;
 
+use obfstr::obfstr as s;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use skyapex_sdk::module::AimbotUtils;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{lock_mod, skyapex::aimbot_utils::AimbotUtils};
+use crate::lock_mod;
 
 #[repr(C)]
 #[allow(dead_code)]
@@ -24,30 +27,30 @@ enum WeaponId {
     Devotion = 84,
     Longbow = 85,
     Havoc = 86,
-    Eva8 = 87,
-    Flatline = 88,
-    G7Scout = 89,
-    Hemlock = 90,
-    Kraber = 92,
-    Lstar = 93,
-    Mastiff = 95,
-    Mozambique = 96,
-    Prowler = 101,
-    Peacekeeper = 103,
-    R99 = 104,
-    P2020 = 105,
-    Spitfire = 106,
-    TripleTake = 107,
+    Eva8 = 88,
+    Flatline = 89,
+    G7Scout = 90,
+    Hemlock = 91,
+    Kraber = 93,
+    Lstar = 94,
+    Mastiff = 96,
+    Mozambique = 97,
+    Prowler = 102,
+    Peacekeeper = 104,
+    R99 = 105,
+    P2020 = 106,
+    Spitfire = 107,
+    TripleTake = 108,
     Wingman = 109,
-    Volt = 110,
-    _3030Repeater = 111,
-    CarSmg = 112,
-    Nemesis = 113,
-    Hands = 114,
+    Volt = 111,
+    _3030Repeater = 112,
+    CarSmg = 113,
+    Nemesis = 114,
+    Hands = 115,
     ThrowingKnife = 158,
-    GrenadeThermite = 159,
-    GrenadeFrag = 160,
-    GrenadeArcStar = 161,
+    GrenadeThermite = 167,
+    GrenadeFrag = 168,
+    GrenadeArcStar = 169,
     Max,
 }
 
@@ -106,7 +109,7 @@ impl Default for AimbotSettings {
             smooth: 200.0,
             skynade_smooth: 200.0 * 0.6667,
             recoil_smooth_x: 51.4,
-            recoil_smooth_y: 51.4,
+            recoil_smooth_y: 11.4,
         }
     }
 }
@@ -399,6 +402,8 @@ impl Aimbot {
         if score < self.target_score_max {
             self.target_score_max = score;
             self.tmp_aimentity = target_ptr;
+            // println!("dist {}", distance);
+            // println!("aim ent {}", target_ptr);
         }
 
         if self.aim_entity == target_ptr {
@@ -524,7 +529,7 @@ impl Aimbot {
             self.weapon_zoom_fov,
         ) > 0
         {
-            rand::thread_rng().gen_range(40..100)
+            rand::thread_rng().gen_range(5..20)
         } else {
             0
         }
@@ -592,9 +597,9 @@ impl TriggerBot for Aimbot {
 
         let trigger_delay = self.calculate_trigger_delay(aim_angles);
         let now_ms = get_unix_timestamp_in_millis();
+        let semi_auto = self.is_semi_auto();
 
         if trigger_delay > 0 {
-            let semi_auto = self.is_semi_auto();
             let attack_pressed = force_attack_state == 5;
 
             match self.triggerbot_state {
@@ -635,7 +640,9 @@ impl TriggerBot for Aimbot {
             match self.triggerbot_state {
                 TriggerState::Idle => (),
                 TriggerState::WaitTrigger => {
-                    self.triggerbot_state = TriggerState::Idle;
+                    if semi_auto {
+                        self.triggerbot_state = TriggerState::Idle;
+                    }
                 }
                 TriggerState::Trigger => {
                     // It's time to release
@@ -658,7 +665,7 @@ fn get_unix_timestamp_in_millis() -> u64 {
         }
         Err(e) => {
             // Handle errors, such as clock rollback
-            panic!("Error getting Unix Timestamp: {}", e);
+            panic!("{}{}", s!("Error getting Unix Timestamp: "), e);
         }
     }
 }

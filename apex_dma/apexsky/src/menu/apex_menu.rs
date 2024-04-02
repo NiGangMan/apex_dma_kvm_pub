@@ -86,6 +86,7 @@ pub(super) enum MenuLevel {
     HealingMenu,
     NadesMenu,
     BackpacksMenu,
+    HopUpsMenu,
     ScopesMenu,
     KeyCodesMenu,
     HotkeyMenu,
@@ -216,6 +217,7 @@ impl<'a> TerminalMenu<'a> {
             MenuLevel::HealingMenu => loot_menu::build_healing_menu(i18n_bundle, data),
             MenuLevel::NadesMenu => loot_menu::build_nades_menu(i18n_bundle, data),
             MenuLevel::BackpacksMenu => loot_menu::build_backpacks_menu(i18n_bundle, data),
+            MenuLevel::HopUpsMenu => loot_menu::build_hopups_menu(i18n_bundle, data),
             MenuLevel::ScopesMenu => loot_menu::build_scopes_menu(i18n_bundle, data),
             MenuLevel::KeyCodesMenu => build_key_codes_menu(i18n_bundle, data),
             MenuLevel::HotkeyMenu => build_hotkey_menu(i18n_bundle, data),
@@ -775,6 +777,68 @@ fn build_aimbot_menu(
             }
             let i18n_bundle = get_fluent_bundle();
             Some(i18n_msg!(i18n_bundle, InfoInvalidSmoothValue).to_string())
+        },
+    )
+    .add_input_item(
+        format_item(
+            &i18n_bundle,
+            format!("13 - {}", i18n_msg!(i18n_bundle, MenuItemRecoilXValue)),
+            if settings.aimbot_settings.recoil_smooth_x > 70.0 {
+                Span::styled(
+                    format!("{}%", settings.aimbot_settings.recoil_smooth_x),
+                    Style::default().fg(Color::Red),
+                )
+            } else if settings.aimbot_settings.recoil_smooth_x <= 70.0 {
+                Span::styled(
+                    format!("{}%", settings.aimbot_settings.recoil_smooth_x),
+                    Style::default().fg(Color::Green),
+                )
+            } else {
+                Span::from(format!("{}%", settings.aimbot_settings.recoil_smooth_x))
+            },
+        ),
+        &i18n_msg!(i18n_bundle, InputPromptRecoilValue),
+        |val| {
+            if let Some(new_val) = val.parse::<f32>().ok() {
+                if new_val >= 0.0 && new_val <= 100.0 {
+                    let settings = &mut lock_config!().settings;
+                    settings.aimbot_settings.recoil_smooth_x = new_val.into();
+                    return None;
+                }
+            }
+            let i18n_bundle = get_fluent_bundle();
+            Some(i18n_msg!(i18n_bundle, InfoInvalidRecoilValue).to_string())
+        },
+    )
+    .add_input_item(
+        format_item(
+            &i18n_bundle,
+            format!("14 - {}", i18n_msg!(i18n_bundle, MenuItemRecoilYValue)),
+            if settings.aimbot_settings.recoil_smooth_y > 70.0 {
+                Span::styled(
+                    format!("{}%", settings.aimbot_settings.recoil_smooth_y),
+                    Style::default().fg(Color::Red),
+                )
+            } else if settings.aimbot_settings.recoil_smooth_y <= 70.0 {
+                Span::styled(
+                    format!("{}%", settings.aimbot_settings.recoil_smooth_y),
+                    Style::default().fg(Color::Green),
+                )
+            } else {
+                Span::from(format!("{}%", settings.aimbot_settings.recoil_smooth_y))
+            },
+        ),
+        &i18n_msg!(i18n_bundle, InputPromptRecoilValue),
+        |val| {
+            if let Some(new_val) = val.parse::<f32>().ok() {
+                if new_val >= 0.0 && new_val <= 100.0 {
+                    let settings = &mut lock_config!().settings;
+                    settings.aimbot_settings.recoil_smooth_y = new_val.into();
+                    return None;
+                }
+            }
+            let i18n_bundle = get_fluent_bundle();
+            Some(i18n_msg!(i18n_bundle, InfoInvalidRecoilValue).to_string())
         },
     )
     .into()

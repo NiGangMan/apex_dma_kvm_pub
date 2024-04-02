@@ -7,10 +7,10 @@
 <br />
 <div align="center">
 
-  <h3 align="center">apex_dma_kvm_pub</h3>
+  <h3 align="center">apexsky</h3>
 
   <p align="center">
-    Apex Legends QEMU/KVM hack
+    Apex Legends hack
     <br />
     <br />
     <br />
@@ -28,23 +28,21 @@
 
 <br />
 
-
-
 ## About The Project
-Apex Legends QEMU/KVM hack
 
-UnknownCheats thread: https://www.unknowncheats.me/forum/apex-legends/406426-kvm-vmread-apex-esp-aimbot.html
+Apex Legends QEMU/KVM/DMA/Linux hack
 
-Bone IDs reference: https://www.unknowncheats.me/wiki/Apex_Legends_Bones_and_Hitboxes
+UnknownCheats thread: <https://www.unknowncheats.me/forum/apex-legends/406426-kvm-vmread-apex-esp-aimbot.html>
 
-Game version (Steam Only right now): v3.0.53.30
+Bone IDs reference: <https://www.unknowncheats.me/wiki/Apex_Legends_Bones_and_Hitboxes>
 
+Game version (Steam Only right now): v3.0.62.29
 
-
+**Please delete the old offsets.ini after updating.**
 
  **Features**
 
-1. KrackerCo Fork's no-overlay features.
+1. apex_dma_kvm_pub no-overlay features.
 
     > This is the No Client(Windows) Branch, nothing is needed on the windows side.
     >
@@ -60,7 +58,7 @@ Game version (Steam Only right now): v3.0.53.30
     >
     > Left/Right or both mouse buttons to aim.
 
-2. KrackerCo Fork's Client features.
+2. apex_dma_kvm_pub Client features.
 
     > ESP Glow color picker for knocked and alive, visable or not visable.
     >
@@ -84,58 +82,52 @@ Game version (Steam Only right now): v3.0.53.30
     >
     > Save and Load config buttons and at s
 
-3. chettoy Fork's features
+3. apexsky features
 
-    * Inherits all features from KrackerCo's original no-overlay branch.
-    * Includes all features from the original repository's overlay branch. (requires overlay enabled)
+    * Inherits all features from apex_dma_kvm_pub.
     * Optional glow box to replace player glow (ideal for screenshot prevention or live broadcasting). (requires overlay enabled)
     * Sky Grenade feature.
     * Improved target locking.
     * Advanced targeting options with various bone selection effects.
     * Calculate and display the game's frame rate.
-    * Aiming Target Indicator (requires overlay enabled)
-    * Config file editing and saving capabilities.
-    * Interactive terminal menu for user-friendly customization.
+    * **Aiming Target Indicator:** Aiming Target Indicator feature (requires overlay enabled).
+    * **Config File Management:** Config file editing and saving capabilities.
+    * **User-Friendly Customization:** Interactive terminal menu with a more intuitive and user-friendly design for customization.
     * Dynamic color changes indicate target armor status.
-    * Highlight favorite gamers for quick identification.
-    * Weapon model glow and spectated indicator.
+    * **Favorite Gamer Highlight:** Highlights favorite gamers for quick identification.
+    * **Weapon Model Glow:** Adds weapon model glow and spectated indicator.
     * Utilize keyboard backlight to display the number of spectators (requires D-Bus support).
-    * Multilingual support for global accessibility.
-
-
+    * **Multilingual Support:** Supports multilingual functionality for global accessibility.
+    * **Predictive Auto Trigger:** Includes a feature with predictive capabilities for automatic triggering.
+    * **Auto-Loading Offsets:** Automatically loads offsets, making it convenient to keep up with game version updates.
+    * **Real-time Team Damage Display:** Shows the total damage dealt by teammates in real-time.
 
 Please star if you like it.
 Look forward to your testing and feedback.
 
-
-
 ## Getting Started
+
+**apexsky_kvm:**
 
 There are really only two steps:
 
 1. Run the game on a windows guest in a kvm virtual machine.
 2. Run the compiled apex_dma program on the Linux host.
+
     ```shell
     sudo ./apex_dma
     ```
 
-
-
 Additional information:
 
-
 1. Please put the overlay window on the top of the VM screen after start. For example, on top of the looking-glass window.
-2. The window can't get the focus at the same time with the VM screen,  please passthrough some keyboard, mouse or joystick into the VM,  otherwise you can't operate the game.
-3. Press insert key on the overlay window to open the overlay menu.
+2. For a better experience, please passthrough your keyboard, mouse or controller into the VM.
+3. Press Insert to open the Overlay menu. Press and hold the Insert key to temporarily interact with the overlay.
 4. If you are using a resolution other than 1080p, save the configuration and then modify the `screen_width` and `screen_height` in *settings.toml* and reload the configuration.
 
-
-
-Click on *[Actions](https://github.com/chettoy/apex_dma_kvm_pub/actions)* to download the auto-built artifacts.
+Click on *[Actions](https://github.com/chettoy/apexsky/actions)* to download the auto-built artifacts.
 
 Or compile it yourself.
-
-
 
 ## Build from source
 
@@ -155,20 +147,18 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 **Install Build Dependencies (Ubuntu):**
 
 ```bash
-sudo apt install cmake clang libzstd-dev libglfw3-dev libfreetype6-dev libvulkan-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev wayland-protocols libwayland-dev libxkbcommon-dev
+sudo apt install cmake clang protobuf-compiler libusb-1.0-0-dev libzstd-dev libglfw3-dev libfreetype6-dev libvulkan-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev wayland-protocols libwayland-dev libxkbcommon-dev
 ```
 
 **Build:**
 
 ```shell
-git clone --recurse https://github.com/chettoy/apex_dma_kvm_pub
-cd apex_dma_kvm_pub
+git clone --recurse https://github.com/chettoy/apexsky
+cd apexsky
 git submodule update --init --recursive
 cd apex_dma
 ./build.sh
 ```
-
-
 
 ## FAQ
 
@@ -183,15 +173,12 @@ cd apex_dma
     > First of all, everything related to game state is realized by *access on those specific memory locations*. So we need to use DMA or VM techniques to access memory covertly.
     > AC detects the overlay client, so we re-implement the overlay outside the VM and remove the client.
 
-3.  I feel the aimbot seem not good as KrackerCo's one
+3. I feel the aimbot seem not good as KrackerCo's one
 
     > We added a few new parameters to aimbot, if you turn auto bone off, turn no-recoil on (it's off by default now) and set the aimbot predict fps to 75, aimbot will run the same as it did before with the same smoothing values.
     > If you want a natural game feel and normal behavior as if you don't use auto-aiming but dramatically increase the hit rate, instead of wanting to lock bullets at a single point, use auto bone and maybe turn off no-recoil.
 
-
-
 ## Acknowledgments
-
 
 * [memflow](https://github.com/memflow/memflow)
 * [ratatui](https://ratatui.rs)
@@ -205,7 +192,6 @@ cd apex_dma
 * [Nexilist/xap-client](https://github.com/Nexilist/xap-client)
 * [Xnieno/ApexDreamForYou](https://github.com/Xnieno/ApexDreamForYou)
 
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- MARKDOWN LINKS & IMAGES -->
@@ -213,9 +199,5 @@ cd apex_dma
 [contributors-url]: https://github.com/chettoy/apex_dma_kvm_pub/graphs/contributors
 [forks-shield]: https://img.shields.io/github/forks/chettoy/apex_dma_kvm_pub.svg?style=for-the-badge
 [forks-url]: https://github.com/chettoy/apex_dma_kvm_pub/network/members
-[stars-shield]: https://img.shields.io/github/starschettoy/apex_dma_kvm_pub.svg?style=for-the-badge
-[stars-url]: https://github.com/chettoy/apex_dma_kvm_pub/stargazers
 [issues-shield]: https://img.shields.io/github/issues/chettoy/apex_dma_kvm_pub.svg?style=for-the-badge
 [issues-url]: https://github.com/chettoy/apex_dma_kvm_pub/issues
-[license-shield]: https://img.shields.io/github/license/chettoy/apex_dma_kvm_pub.svg?style=for-the-badge
-[license-url]: https://github.com/chettoy/apex_dma_kvm_pub/blob/main/LICENSE.txt

@@ -1,5 +1,7 @@
 use global_state::CGlobalState;
+use obfstr::obfstr as s;
 use serde::{Deserialize, Serialize};
+use skyapex_sdk::module::Utils;
 
 mod aimbot;
 mod config;
@@ -9,19 +11,13 @@ mod love_players;
 mod math;
 mod menu;
 mod offsets;
-mod pitches;
-mod skyapex;
-mod skynade;
-mod solver;
+mod pb;
 mod system;
+mod web_map_radar;
 
 #[macro_use]
 extern crate lazy_static;
 
-#[macro_use]
-extern crate apexsky_derive;
-
-use crate::skyapex::utils::Utils;
 use global_state::G_CONTEXT;
 use global_state::G_STATE;
 
@@ -35,9 +31,7 @@ pub extern "C" fn __get_global_states() -> CGlobalState {
 #[no_mangle]
 pub extern "C" fn __update_global_states(state: CGlobalState) {
     let global_state = &mut G_STATE.lock().unwrap();
-    global_state.config.settings = state.settings;
-    global_state.terminal_t = state.terminal_t;
-    global_state.tui_forceupdate = state.tui_forceupdate;
+    global_state.update(state);
 }
 
 // config
@@ -46,7 +40,7 @@ pub extern "C" fn __update_global_states(state: CGlobalState) {
 pub extern "C" fn __load_settings() {
     lock_config!() = crate::config::get_configuration().unwrap_or_else(|e| {
         println!("{}", e);
-        println!("Fallback to defalut configuration.");
+        println!("{}", s!("Fallback to defalut configuration."));
         crate::config::Config::default()
     });
 }
@@ -77,19 +71,19 @@ pub use love_players::check_love_player;
 
 #[no_mangle]
 pub extern "C" fn init_spec_checker(local_player_ptr: u64) {
-    use skyapex::spectators::SpecCheck;
+    use skyapex_sdk::module::SpecCheck;
     lock_mod!().init_spec_checker(local_player_ptr);
 }
 
 #[no_mangle]
 pub extern "C" fn tick_yew(target_ptr: u64, yew: f32) {
-    use skyapex::spectators::SpecCheck;
+    use skyapex_sdk::module::SpecCheck;
     lock_mod!().tick_yew(target_ptr, yew);
 }
 
 #[no_mangle]
 pub extern "C" fn is_spec(target_ptr: u64) -> bool {
-    use skyapex::spectators::SpecCheck;
+    use skyapex_sdk::module::SpecCheck;
     lock_mod!().is_spec(target_ptr)
 }
 

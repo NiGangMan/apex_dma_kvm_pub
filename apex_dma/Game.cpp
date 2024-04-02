@@ -1,10 +1,12 @@
 #include "Game.h"
 #include "apex_sky.h"
+#include "lib/xorstr/xorstr.hpp"
 #include "prediction.h"
 #include "vector.h"
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -94,7 +96,7 @@ bool Entity::isDummy(uintptr_t ptr) {
   char class_name[33] = {};
   get_class_name(ptr, class_name);
 
-  return strncmp(class_name, "CAI_BaseNPC", 11) == 0;
+  return strncmp(class_name, xorstr_("CAI_BaseNPC"), 11) == 0;
 }
 
 bool Entity::isKnocked() {
@@ -218,7 +220,7 @@ void Entity::enableGlow(int setting_index, uint8_t inside_value,
   apex_mem.Write<HighlightSetting_t>(highlight_settings_ptr + 0x34 * context_id,
                                      highlight_settings);
 
-  apex_mem.Write<float>(ptr + offsets.entity_fade_dist, 8.0E+4);
+  apex_mem.Write<float>(ptr + 0x264, 8.0E+4);
 
   apex_mem.Write(g_Base + OFFSET_GLOW_FIX, 1);
 }
@@ -250,7 +252,7 @@ QAngle Entity::GetRecoil() {
 }
 
 void Entity::get_name(char *name) {
-  uint64_t index = (this->entity_index - 1) << 4;
+  uint64_t index = (this->entity_index - 1) * 24;
   uint64_t name_ptr = 0;
   apex_mem.Read<uint64_t>(g_Base + offsets.name_list + index, name_ptr);
   apex_mem.ReadArray<char>(name_ptr, name, 32);
@@ -328,7 +330,7 @@ LoveStatus Entity::check_love_player() {
 
 int Entity::xp_level() {
   assert(this->is_player);
-  return this->player_xp_level;
+  return this->player_xp_level + 1;
 }
 
 int Entity::read_xp_level() {
@@ -391,21 +393,21 @@ bool Item::isItem() {
   char class_name[33] = {};
   get_class_name(ptr, class_name);
 
-  return strncmp(class_name, "CPropSurvival", 13) == 0;
+  return strncmp(class_name, xorstr_("CPropSurvival"), 13) == 0;
 }
 // Deathboxes
 bool Item::isBox() {
   char class_name[33] = {};
   get_class_name(ptr, class_name);
 
-  return strncmp(class_name, "CDeathBoxProp", 13) == 0;
+  return strncmp(class_name, xorstr_("CDeathBoxProp"), 13) == 0;
 }
 // Traps
 bool Item::isTrap() {
   char class_name[33] = {};
   get_class_name(ptr, class_name);
 
-  return strncmp(class_name, "caustic_trap", 13) == 0;
+  return strncmp(class_name, xorstr_("caustic_trap"), 13) == 0;
 }
 
 // bool Item::isGlowing() {
@@ -548,15 +550,14 @@ aim_angles_t CalculateBestBoneAim(Entity &from, Entity &target,
     Math::NormalizeAngles(CalculatedAnglesMax);
     QAngle DeltaMin = CalculatedAnglesMin - ViewAngles;
     QAngle DeltaMax = CalculatedAnglesMax - ViewAngles;
-    Math::NormalizeAngles(DeltaMin);
-    Math::NormalizeAngles(DeltaMax);
+    Math::NormalizeDeltaAngles(DeltaMin);
+    Math::NormalizeDeltaAngles(DeltaMax);
 
     QAngle Delta = QAngle(0, 0, 0);
     if (DeltaMin.x * DeltaMax.x > 0)
       Delta.x = (DeltaMin.x + DeltaMax.x) * 0.5f;
     if (DeltaMin.y * DeltaMax.y > 0)
       Delta.y = (DeltaMin.y + DeltaMax.y) * 0.5f;
-    Math::NormalizeAngles(Delta);
 
     return aim_angles_t{true,       ViewAngles.x, ViewAngles.y, Delta.x,
                         Delta.y,    DeltaMin.x,   DeltaMax.x,   DeltaMin.y,
@@ -569,6 +570,12 @@ aim_angles_t CalculateBestBoneAim(Entity &from, Entity &target,
     Vector view_origin = local_origin + view_offset;
     Vector target_origin = target.getPosition() + targetVel * deltaTime;
     aim_target = target_origin;
+
+    QAngle target_angle = Math::CalcAngle(view_origin, target_origin);
+    if (abs(target_angle.x) > 80) {
+      return aim_angles_t{false};
+    }
+
     vec4_t skynade_angles =
         skynade_angle(aimbot.weapon_id, aimbot.weapon_mod_bitfield,
                       aimbot.bullet_gravity / 750.0f, aimbot.bullet_speed,
@@ -584,13 +591,13 @@ aim_angles_t CalculateBestBoneAim(Entity &from, Entity &target,
     }
 
     const float PIS_IN_180 = 57.2957795130823208767981548141051703f;
-    QAngle TargetAngles = QAngle(-skynade_angles.x * PIS_IN_180,
-                                 skynade_angles.y * PIS_IN_180, 0);
+    QAngle target_aim_angles = QAngle(-skynade_angles.x * PIS_IN_180,
+                                      skynade_angles.y * PIS_IN_180, 0);
     // printf("weap=%d, bitfield=%d, (%.1f, %.1f)\n", weapon_id,
     //        weapon_mod_bitfield, TargetAngles.x, TargetAngles.y);
 
-    QAngle Delta = TargetAngles - ViewAngles;
-    Math::NormalizeAngles(Delta);
+    QAngle Delta = target_aim_angles - ViewAngles;
+    Math::NormalizeDeltaAngles(Delta);
     return aim_angles_t{true,    ViewAngles.x, ViewAngles.y, Delta.x, Delta.y,
                         Delta.x, Delta.x,      Delta.y,      Delta.y, distance};
   }
@@ -672,9 +679,13 @@ void WeaponXEntity::update(uint64_t LocalPlayer) {
                      mod_bitfield);
   weap_id = 0;
   apex_mem.Read<uint32_t>(wep_entity + offsets.weaponx_weapon_name, weap_id);
+  lastChargeLevel = 0;
+  apex_mem.Read<int>(wep_entity + m_lastChargeLevel,lastChargeLevel);
 }
 
-float WeaponXEntity::get_projectile_speed() { return projectile_speed; }
+float WeaponXEntity::get_projectile_speed() { 
+return ((weap_id == 2) ? projectile_speed + pow(lastChargeLevel, 5.4684388195808) : projectile_speed);
+}
 
 float WeaponXEntity::get_projectile_gravity() {
   return 750.0f * projectile_scale;

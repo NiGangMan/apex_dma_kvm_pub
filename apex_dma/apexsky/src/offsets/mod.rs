@@ -1,14 +1,14 @@
-use crate::{
-    lock_mod,
-    skyapex::offsets_loader::CustomOffsets,
-};
+use crate::lock_mod;
+use obfstr::obfstr as s;
+use skyapex_sdk::module::CustomOffsets;
 
 #[no_mangle]
 pub extern "C" fn import_offsets() -> CustomOffsets {
-    let default_offsets = include_str!("../../resource/default/offsets.ini");
-    let offsets_file_path = std::env::current_dir().unwrap().join("offsets.ini");
-    if !offsets_file_path.exists() {
-        std::fs::write(offsets_file_path, default_offsets).expect("Failed to write offsets.ini");
+    let offsets_file_path = std::env::current_dir().unwrap().join(s!("offsets.ini"));
+    if offsets_file_path.exists() {
+        CustomOffsets::from_file(&mut lock_mod!())
+    } else {
+        include_flate::flate!(static OFFSETS_INI: str from "resource/default/offsets.ini");
+        CustomOffsets::from_string(&mut lock_mod!(), OFFSETS_INI.to_owned())
     }
-    CustomOffsets::load(&mut lock_mod!())
 }

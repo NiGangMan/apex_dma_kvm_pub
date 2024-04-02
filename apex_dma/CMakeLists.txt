@@ -54,6 +54,8 @@ ExternalProject_Add(
 find_package(Threads REQUIRED)
 
 # GLFW
+set(GLFW_BUILD_WAYLAND ON)
+set(GLFW_BUILD_X11 OFF)
 set(GLFW_DIR ${PROJECT_SOURCE_DIR}/Client/glfw)
 option(GLFW_BUILD_EXAMPLES "Build the GLFW example programs" OFF)
 option(GLFW_BUILD_TESTS "Build the GLFW test programs" OFF)
@@ -73,7 +75,7 @@ add_executable(apex_dma
     apex_dma.cpp apex_sky.cpp Game.cpp Math.cpp memory.cpp
     ${PROJECT_SOURCE_DIR}/Client/main.cpp
     ${PROJECT_SOURCE_DIR}/Client/overlay.cpp
-    ${PROJECT_SOURCE_DIR}/Client/impl/render/font.cpp
+    ${PROJECT_SOURCE_DIR}/Client/font.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_demo.cpp
     ${IMGUI_DIR}/imgui_draw.cpp

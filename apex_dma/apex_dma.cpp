@@ -1,6 +1,7 @@
 #include "Client/main.h"
 #include "Game.h"
 #include "apex_sky.h"
+#include "lib/xorstr/xorstr.hpp"
 #include "vector.h"
 #include <array>
 #include <cassert>
@@ -10,10 +11,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib> // For the system() function
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
@@ -27,7 +31,6 @@ extern const exported_offsets_t offsets;
 
 // Just setting things up, dont edit.
 bool active = true;
-aimbot_state_t aimbot;
 const int ENT_NUM = 10000;
 extern Vector aim_target; // for esp
 int map_testing_local_team = 0;
@@ -45,14 +48,15 @@ bool aim_t = false;
 bool item_t = false;
 bool control_t = false;
 uint64_t g_Base;
-bool next2 = false;
-bool valid = false;
 extern float bulletspeed;
 extern float bulletgrav;
-Vector esp_local_pos;
+Vector g_esp_local_pos;
 int itementcount = 10000;
 int map = 0;
 std::vector<TreasureClue> treasure_clues;
+std::map<int, float> lastvis_esp, lastvis_aim;
+size_t g_spectators = 0, g_allied_spectators = 0;
+std::mutex esp_mtx;
 
 //^^ Don't EDIT^^
 
@@ -70,7 +74,7 @@ bool isPressed(uint32_t button_code) {
 
 void memory_io_panic(const char *info) {
   tui_menu_quit();
-  std::cout << "Error " << info << std::endl;
+  std::cout << xorstr_("Error ") << info << std::endl;
   exit(0);
 }
 
@@ -97,7 +101,7 @@ void TriggerBotRun() {
   apex_mem.Write<int>(g_Base + offsets.in_attack + 0x8, 5);
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
   apex_mem.Write<int>(g_Base + offsets.in_attack + 0x8, 4);
-  // printf("TriggerBotRun\n");
+  // printf(xorstr_("TriggerBotRun\n"));
 }
 
 bool IsInCrossHair(Entity &target) {
@@ -109,7 +113,7 @@ bool IsInCrossHair(Entity &target) {
     if (last_crosshair_target_time != -1.f) {
       if (now_crosshair_target_time > last_crosshair_target_time) {
         is_in_cross_hair = true;
-        // printf("Trigger\n");
+        // printf(xorstr_("Trigger\n"));
         last_crosshair_target_time = -1.f;
       } else {
         is_in_cross_hair = false;
@@ -126,12 +130,7 @@ bool IsInCrossHair(Entity &target) {
   return is_in_cross_hair;
 }
 
-// Visual check and aim check.?
-std::map<int, float> lastvis_esp, lastvis_aim;
-std::vector<Entity> spectators, allied_spectators;
-std::mutex spectatorsMtx;
-
-void MapRadarTesting() {
+void MapRadarTesting() { // 为什么这能把雷达搞出来...不就来回写了一个地址
   uintptr_t pLocal;
   apex_mem.Read<uint64_t>(g_Base + offsets.local_ent, pLocal);
   int dt;
@@ -165,39 +164,61 @@ void ClientActions() {
                                           button_state);
 
       int attack_state = 0, zoom_state = 0, tduck_state = 0, jump_state = 0,
+          backward_state = 0, forward_state = 0, skydrive_state = 0,
           force_jump = 0, force_toggle_duck = 0, force_duck = 0,
-          curFrameNumber = 0;
+          force_forward = 0, curFrameNumber = 0, flags = 0, duck_state = 0;
+      float wallrun_start = 0.0f, wallrun_clear = 0.0f;
+      bool longclimb = false;
       apex_mem.Read<int>(g_Base + offsets.in_attack,
                          attack_state);                         // 108
       apex_mem.Read<int>(g_Base + offsets.in_zoom, zoom_state); // 109
       apex_mem.Read<int>(g_Base + offsets.in_toggle_duck,
                          tduck_state); // 61
       apex_mem.Read<int>(g_Base + offsets.in_jump, jump_state);
+
       apex_mem.Read<int>(g_Base + offsets.in_jump + 0x8, force_jump);
       apex_mem.Read<int>(g_Base + offsets.in_toggle_duck + 0x8,
                          force_toggle_duck);
       apex_mem.Read<int>(g_Base + offsets.in_duck + 0x8, force_duck);
+      apex_mem.Read<int>(g_Base + offsets.in_backward,
+                         backward_state); // 后退状态
+      apex_mem.Read<int>(local_player_ptr + offsets.centity_flags,
+                         flags); // 玩家空间状态？
+      apex_mem.Read<float>(local_player_ptr +
+                               offsets.cplayer_wall_run_start_time,
+                           wallrun_start);
+      apex_mem.Read<float>(local_player_ptr +
+                               offsets.cplayer_wall_run_clear_time,
+                           wallrun_clear);
+      apex_mem.Read<int>(local_player_ptr + offsets.player_skydive_state,
+                         skydrive_state); // 跳伞状态
+      apex_mem.Read<int>(local_player_ptr + offsets.player_duck_state,
+                         duck_state); // 玩家下蹲状态
+      apex_mem.Read<int>(g_Base + offsets.in_forward,
+                         forward_state); // 前进状态
+      apex_mem.Read<int>(g_Base + offsets.in_forward + 0x8,
+                         force_forward); // 前进按键
       apex_mem.Read<int>(g_Base + offsets.global_vars + 0x0008,
                          curFrameNumber); // GlobalVars + 0x0008
 
       float world_time, traversal_start_time, traversal_progress;
       if (!apex_mem.Read<float>(local_player_ptr + offsets.cplayer_timebase,
                                 world_time)) {
-        // memory_io_panic("read time_base");
+        // memory_io_panic(xorstr_("read time_base"));
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         break;
       }
       if (!apex_mem.Read<float>(local_player_ptr +
                                     offsets.cplayer_traversal_starttime,
                                 traversal_start_time)) {
-        // memory_io_panic("read traversal_starttime");
+        // memory_io_panic(xorstr_("read traversal_starttime"));
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         break;
       }
       if (!apex_mem.Read<float>(local_player_ptr +
                                     offsets.cplayer_traversal_progress,
                                 traversal_progress)) {
-        memory_io_panic("read traversal_progress");
+        memory_io_panic(xorstr_("read traversal_progress"));
       }
 
       //   printf("Travel Time: %f\n", traversal_progress);
@@ -206,6 +227,63 @@ void ClientActions() {
       //   printf("Jump Value: %i\n", force_jump);
       //   printf("ToggleDuck Value: %i\n", force_toggle_duck);
       //   printf("Duck Value: %i\n", force_duck);
+      if (g_settings.auto_tapstrafe) {
+        bool ts_start = true;
+        // autoTapstrafe
+        if (wallrun_start > wallrun_clear) {
+          float climbTime = world_time - wallrun_start;
+          if (climbTime > 0.8) {
+            longclimb = true;
+            ts_start = false;
+          } else {
+            ts_start = true;
+          }
+        }
+        if (ts_start) {
+          if (longclimb) {
+            if (world_time > wallrun_clear + 0.1)
+              longclimb = false;
+          }
+          // printf("longclimb:%d\n", longclimb);
+          // printf("duck_state:%d"\n, duck_state); 向下蹲1 完全蹲下2 起身过程3
+          // 其他0 printf("jump_state:%d"\n, jump_state); 按着跳跃65 其他0
+          // printf("foreward_state:%d"\n, foreward_state); 按w时33，其他0
+          // 滚轮前进不触发 printf("flags:%d"\n, flags);  空中状态64 蹲下67
+          // 站立65 printf("force_foreward :%d\n", force_foreward);按下w是1
+          // 其他0 printf("force_jump :%d\n", force_jump);按着跳跃5 其他4
+          //  when player is in air  and  not skydrive    and  not longclimb and
+          //  not backward
+          if (((flags & 0x1) == 0) && !(skydrive_state > 0) && !longclimb &&
+              !(backward_state > 0)) {
+            if (((duck_state > 0) && (forward_state == 33))) { // previously 33
+              if (force_forward == 0) {
+                apex_mem.Write<int>(g_Base + offsets.in_forward + 0x8, 1);
+              } else {
+                apex_mem.Write<int>(g_Base + offsets.in_forward + 0x8, 0);
+              }
+            }
+          } else if ((flags & 0x1) != 0) {
+            if (forward_state == 0) {
+              apex_mem.Write<int>(g_Base + offsets.in_forward + 0x8, 0);
+            } else if (forward_state == 33) {
+              apex_mem.Write<int>(g_Base + offsets.in_forward + 0x8, 1);
+            }
+          }
+        }
+      }
+      ////// bunny hop
+      /*
+      if (jump_state == 65 && ((flags & 0x1) != 0)) {
+          if (force_jump == 5 && !bunnyhop && (world_time > (bhopTick + 0.1))) {
+              apex_mem.Write<int>(g_Base + OFFSET_IN_JUMP + 0x8, 4);
+              bunnyhop = true;
+          }
+          else if (bunnyhop) {
+              apex_mem.Write<int>(g_Base + OFFSET_IN_JUMP + 0x8, 5);
+              bunnyhop = false;
+              bhopTick = world_time;
+          }
+      }*/
 
       if (g_settings.super_key_toggle) {
         /** SuperGlide
@@ -312,22 +390,40 @@ void ClientActions() {
         }
       }
 
-      if (isPressed(g_settings.aimbot_hot_key_1)) {
-        aimbot_update_aim_key_state(&aimbot, g_settings.aimbot_hot_key_1);
-      } else if (isPressed(g_settings.aimbot_hot_key_2)) {
-        aimbot_update_aim_key_state(&aimbot, g_settings.aimbot_hot_key_2);
-      } else {
-        aimbot_update_aim_key_state(&aimbot, 0);
+      { // Update key state for aimbot
+
+        if (isPressed(g_settings.aimbot_hot_key_1)) {
+          aimbot_update_aim_key_state(g_settings.aimbot_hot_key_1);
+        } else if (isPressed(g_settings.aimbot_hot_key_2)) {
+          aimbot_update_aim_key_state(g_settings.aimbot_hot_key_2);
+        } else {
+          aimbot_update_aim_key_state(0);
+        }
+
+        aimbot_update_attack_state(attack_state);
+        aimbot_update_zoom_state(zoom_state);
+
+        if (isPressed(g_settings.trigger_bot_hot_key)) {
+          aimbot_update_triggerbot_key_state(g_settings.trigger_bot_hot_key);
+        } else {
+          aimbot_update_triggerbot_key_state(0);
+        }
       }
 
-      aimbot_update_attack_state(&aimbot, attack_state);
-      aimbot_update_zoom_state(&aimbot, zoom_state);
-
-      if (isPressed(g_settings.trigger_bot_hot_key)) {
-        aimbot_update_triggerbot_key_state(&aimbot,
-                                           g_settings.trigger_bot_hot_key);
-      } else {
-        aimbot_update_triggerbot_key_state(&aimbot, 0);
+      int isGrppleActived, isGrppleAttached;
+      apex_mem.Read<int>(local_player_ptr + offsets.player_grapple_active,
+                         isGrppleActived);
+      if (g_settings.super_grpple) {
+        if (isGrppleActived) {
+          apex_mem.Read<int>(local_player_ptr + offsets.player_grapple +
+                                 offsets.grapple_attached,
+                             isGrppleAttached);
+          if (isGrppleAttached == 1) {
+            apex_mem.Write<int>(g_Base + offsets.in_jump + 0x08, 5);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            apex_mem.Write<int>(g_Base + offsets.in_jump + 0x08, 4);
+          }
+        }
       }
 
       // Trigger ring check on F8 key press for over 0.5 seconds
@@ -364,11 +460,8 @@ void ControlLoop() {
   control_t = true;
   while (control_t) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    spectatorsMtx.lock();
-    int spec_count = spectators.size();
-    spectatorsMtx.unlock();
-    if (spec_count > 0) {
-      kbd_backlight_blink(spec_count);
+    if (g_spectators > 0) {
+      kbd_backlight_blink(g_spectators);
       std::this_thread::sleep_for(std::chrono::milliseconds(10 * 1000 - 100));
     }
   }
@@ -456,15 +549,17 @@ void SetPlayerGlow(Entity &LPlayer, Entity &Target, int index,
 }
 
 void ProcessPlayer(Entity &LPlayer, Entity &target, uint64_t entitylist,
-                   int index, int frame_number,
-                   std::set<uintptr_t> &tmp_specs) {
-  const auto g_settings = global_settings();
+                   int index, int frame_number, std::set<uintptr_t> &tmp_specs,
+                   const settings_t g_settings) {
+  if (!lastvis_aim.contains(index)) {
+    lastvis_aim[index] = 0.0f;
+  }
 
   int entity_team = target.getTeamId();
   int local_team = LPlayer.getTeamId();
   // printf("Target Team: %i\n", entity_team);
 
-  if (!target.isAlive() || !LPlayer.isAlive()) {
+  if (target.is_player && (!target.isAlive() || !LPlayer.isAlive())) {
     // Update yew to spec checker
     tick_yew(target.ptr, target.GetYaw());
     // Exclude self from list when watching others
@@ -493,24 +588,24 @@ void ProcessPlayer(Entity &LPlayer, Entity &target, uint64_t entitylist,
   }
 
   if (!g_settings.firing_range) {
-    if (entity_team < 0 || entity_team > 50 ||
-        ((entity_team == local_team ||
-          (map_testing_local_team != 0 &&
-           entity_team == map_testing_local_team)) &&
-         !g_settings.onevone)) {
+    if ((entity_team == local_team ||
+         (map_testing_local_team != 0 &&
+          entity_team == map_testing_local_team)) &&
+        !g_settings.onevone) {
       return;
     }
   }
 
   if (target.ptr != LPlayer.ptr) {
     // Targeting
-    Vector target_pos_c = target.getBonePositionByHitbox(2);
+    Vector target_pos = target.getPosition();
     Vector local_pos = LPlayer.getPosition();
-    float dist = local_pos.DistTo(target_pos_c);
+    float dist = local_pos.DistTo(target_pos);
     float fov = CalculateFov(LPlayer, target);
     bool vis = target.lastVisTime() > lastvis_aim[index];
     bool love = target.check_love_player();
-    aimbot_add_select_target(&aimbot, fov, dist, vis, love, target.ptr);
+
+    aimbot_add_select_target(fov, dist, vis, love, target.ptr);
 
     // Player Glow
     SetPlayerGlow(LPlayer, target, index, frame_number);
@@ -525,6 +620,7 @@ void DoActions() {
   actions_t = true;
   while (actions_t) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     while (g_Base != 0) {
       std::this_thread::sleep_for(
@@ -538,33 +634,37 @@ void DoActions() {
       char level_name[200] = {0};
       apex_mem.ReadArray<char>(g_Base + offsets.levelname, level_name, 200);
       // printf("%s\n", level_name);
-      if (strcmp(level_name, "mp_lobby") == 0) {
+      if (strcmp(level_name, xorstr_("mp_lobby")) == 0) {
         map = 0;
-      } else if (strcmp(level_name, "mp_rr_canyonlands_staging_mu1") == 0) {
+      } else if (strcmp(level_name, xorstr_("mp_rr_canyonlands_staging_mu1")) ==
+                 0) {
         map = 1;
-      } else if (strcmp(level_name, "mp_rr_tropic_island_mu1_storm") == 0) {
+      } else if (strcmp(level_name, xorstr_("mp_rr_tropic_island_mu1_storm")) ==
+                 0) {
         map = 2;
-      } else if (strcmp(level_name, "mp_rr_desertlands_hu") == 0) {
+      } else if (strcmp(level_name, xorstr_("mp_rr_desertlands_hu")) == 0) {
         map = 3;
-      } else if (strcmp(level_name, "mp_rr_olympus") == 0) {
+      } else if (strcmp(level_name, xorstr_("mp_rr_olympus")) == 0) {
         map = 4;
-      } else if (strcmp(level_name, "mp_rr_divided_moon") == 0) {
+      } else if (strcmp(level_name, xorstr_("mp_rr_divided_moon")) == 0) {
         map = 5;
       } else {
+        map = -1;
         map = -1;
       }
 
       {
-        int pad = 0;
-        apex_mem.Read<int>(LocalPlayer + offsets.player_controller_active, pad);
-        bool controller_active = pad == 1;
+        // int pad = 0;
+        // apex_mem.Read<int>(LocalPlayer + offsets.player_controller_active, pad);
+        // bool controller_active = pad == 1;
         bool firing_range_mode = map == 1;
 
         bool update = true;
         auto settings = global_settings();
-        if (settings.aimbot_settings.gamepad != controller_active) {
-          settings.aimbot_settings.gamepad = controller_active;
-        } else if (settings.firing_range != firing_range_mode) {
+        // if (settings.aimbot_settings.gamepad != controller_active) {
+        //   settings.aimbot_settings.gamepad = controller_active;
+        // } else 
+        if (settings.firing_range != firing_range_mode) {
           settings.firing_range = firing_range_mode;
         } else {
           update = false;
@@ -585,16 +685,15 @@ void DoActions() {
       }
 
       Entity LPlayer = getEntity(LocalPlayer);
-
       const int team_player = LPlayer.getTeamId();
-      if (team_player < 0 || team_player > 50) {
-        continue;
-      }
       uint64_t entitylist = g_Base + offsets.entitylist;
 
       uint64_t baseent = 0;
       apex_mem.Read<uint64_t>(entitylist, baseent);
-      if (baseent == 0) {
+
+      if (team_player < 0 || team_player > 50 || baseent == 0) {
+        g_spectators = g_allied_spectators = 0;
+
         continue;
       }
 
@@ -612,7 +711,8 @@ void DoActions() {
       apex_mem.Read<int>(g_Base + offsets.global_vars + 0x0008, frame_number);
 
       std::set<uintptr_t> tmp_specs;
-      aimbot_start_select_target(&aimbot);
+
+      aimbot_start_select_target();
 
       for (int i = 0; i < ENT_NUM; i++) {
         uint64_t centity = 0;
@@ -636,12 +736,14 @@ void DoActions() {
           continue;
         }
         Entity Target = getEntity(centity);
-        ProcessPlayer(LPlayer, Target, entitylist, i, frame_number, tmp_specs);
+        ProcessPlayer(LPlayer, Target, entitylist, i, frame_number, tmp_specs,
+                      g_settings);
       }
+
+      aimbot_finish_select_target();
 
       { // refresh spectators count
         std::vector<Entity> tmp_spec, tmp_all_spec;
-        spectatorsMtx.lock();
         for (auto it = tmp_specs.begin(); it != tmp_specs.end(); it++) {
           Entity target = getEntity(*it);
           if (target.getTeamId() == team_player) {
@@ -650,23 +752,18 @@ void DoActions() {
             tmp_spec.push_back(target);
           }
         }
-        spectators.clear();
-        allied_spectators.clear();
-        spectators = tmp_spec;
-        allied_spectators = tmp_all_spec;
-        spectatorsMtx.unlock();
+        g_spectators = tmp_spec.size();
+        g_allied_spectators = tmp_all_spec.size();
       }
-
-      aimbot_finish_select_target(&aimbot);
 
       // weapon model glow
       // printf("%d\n", LPlayer.getHealth());
       if (g_settings.weapon_model_glow && LPlayer.getHealth() > 0) {
         std::array<float, 3> highlight_color;
-        if (spectators.size() > 0) {
+        if (g_spectators > 0) {
           highlight_color = {1, 0, 0};
           LPlayer.glow_weapon_model(true, false, highlight_color);
-        } else if (allied_spectators.size() > 0) {
+        } else if (g_allied_spectators > 0) {
           highlight_color = {0, 1, 0};
           LPlayer.glow_weapon_model(true, false, highlight_color);
         } else {
@@ -688,191 +785,173 @@ void DoActions() {
 // /////////////////////////////////////////////////////////////////////////////////////////////////////
 
 std::vector<player> players(100);
-Matrix view_matrix_data = {};
+Matrix g_view_matrix = {};
 
 // ESP loop.. this helps right?
 static void EspLoop() {
   esp_t = true;
   while (esp_t) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // Update ESP data
     while (g_Base != 0 && overlay_t) {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
       const auto g_settings = global_settings();
 
-      if (g_settings.esp) {
-        valid = false;
-
-        uint64_t LocalPlayer = 0;
-        apex_mem.Read<uint64_t>(g_Base + offsets.local_ent, LocalPlayer);
-        if (LocalPlayer == 0) {
-          next2 = true;
-          while (next2 && g_Base != 0 && overlay_t && g_settings.esp) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
-          continue;
-        }
-        Entity LPlayer = getEntity(LocalPlayer);
-        int team_player = LPlayer.getTeamId();
-        if (team_player < 0 || team_player > 50) {
-          next2 = true;
-          while (next2 && g_Base != 0 && overlay_t && g_settings.esp) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-          }
-          continue;
-        }
-        Vector LocalPlayerPosition = LPlayer.getPosition();
-        esp_local_pos = LocalPlayerPosition;
-
-        uint64_t viewRenderer = 0;
-        apex_mem.Read<uint64_t>(g_Base + offsets.view_render, viewRenderer);
-        uint64_t viewMatrix = 0;
-        apex_mem.Read<uint64_t>(viewRenderer + offsets.view_matrix, viewMatrix);
-
-        apex_mem.Read<Matrix>(viewMatrix, view_matrix_data);
-
-        uint64_t entitylist = g_Base + offsets.entitylist;
-
-        players.clear();
-
-        {
-          Vector LocalPlayerPosition = LPlayer.getPosition();
-          QAngle localviewangle = LPlayer.GetViewAngles();
-
-          int var_k;
-          apex_mem.Read<int>(g_Base + 0xc936bb8, var_k);
-
-          // Ammount of ents to loop, dont edit.
-          for (int i = 0; i < 100; i++) {
-            // Read entity pointer
-            uint64_t centity = 0;
-            apex_mem.Read<uint64_t>(entitylist + ((uint64_t)i << 5), centity);
-            if (centity == 0) {
-              continue;
-            }
-
-            // Exclude undesired entity
-            bool is_player = Entity::isPlayer(centity);
-            if (g_settings.firing_range) {
-              if (!(Entity::isDummy(centity) ||
-                    (g_settings.onevone && is_player))) {
-                continue;
-              }
-            } else {
-              if (!is_player) {
-                continue;
-              }
-            }
-
-            // Exclude self
-            if (LocalPlayer == centity) {
-              continue;
-            }
-
-            // Get entity data
-            Entity Target = getEntity(centity);
-
-            int entity_team = Target.getTeamId();
-
-            // Exclude invalid team
-            if (entity_team < 0 || entity_team > 50) {
-              continue;
-            }
-
-            Vector EntityPosition = Target.getPosition();
-            float dist = LocalPlayerPosition.DistTo(EntityPosition);
-
-            // Excluding targets that are too far or too close
-            if (dist > g_settings.max_dist || dist < 20.0f) {
-              continue;
-            }
-
-            Vector bs = Vector();
-            // Change res to your res here, default is 1080p but can copy paste
-            // 1440p here
-            WorldToScreen(EntityPosition, view_matrix_data.matrix,
-                          g_settings.screen_width, g_settings.screen_height,
-                          bs); // 2560, 1440
-            if (g_settings.esp) {
-              Vector hs = Vector();
-              Vector HeadPosition = Target.getBonePositionByHitbox(0);
-              WorldToScreen(HeadPosition, view_matrix_data.matrix,
-                            g_settings.screen_width, g_settings.screen_height,
-                            hs); // 2560, 1440
-              float height = abs(abs(hs.y) - abs(bs.y));
-              float width = height / 2.0f;
-              float boxMiddle = bs.x - (width / 2.0f);
-              int health = Target.getHealth();
-              int shield = Target.getShield();
-              int maxshield = Target.getMaxshield();
-              int armortype = Target.getArmortype();
-              Vector EntityPosition = Target.getPosition();
-              float targetyaw = Target.GetYaw();
-
-              player data_buf = {dist,
-                                 entity_team,
-                                 entity_team == team_player,
-                                 boxMiddle,
-                                 hs.y,
-                                 width,
-                                 height,
-                                 bs.x,
-                                 bs.y,
-                                 Target.isKnocked(),
-                                 (Target.lastVisTime() > lastvis_esp[i]),
-                                 health,
-                                 shield,
-                                 maxshield,
-                                 Target.xp_level(),
-                                 -99,
-                                 armortype,
-                                 EntityPosition,
-                                 LocalPlayerPosition,
-                                 localviewangle,
-                                 targetyaw,
-                                 Target.isAlive(),
-                                 Target.check_love_player(),
-                                 false};
-
-              int var_ent_i = 0;
-              apex_mem.Read<int>(Target.ptr + 17856, var_ent_i);
-              uintptr_t var_ptr;
-              apex_mem.Read<uintptr_t>(entitylist + (var_ent_i & 0xffff) * 32,
-                                       var_ptr);
-              apex_mem.Read<int>(var_ptr + (var_k << 2) + 2936,
-                                 data_buf.damage);
-
-              Target.get_name(data_buf.name);
-
-              spectatorsMtx.lock();
-              if (data_buf.is_teammate) {
-                for (auto &ent : allied_spectators) {
-                  if (ent.ptr == centity) {
-                    data_buf.is_spectator = true;
-                    break;
-                  }
-                }
-              } else {
-                for (auto &ent : spectators) {
-                  if (ent.ptr == centity) {
-                    data_buf.is_spectator = true;
-                    break;
-                  }
-                }
-              }
-              spectatorsMtx.unlock();
-
-              players.push_back(data_buf);
-              lastvis_esp[i] = Target.lastVisTime();
-              valid = true;
-            }
-          }
-        }
-
-        next2 = true;
-        while (next2 && g_Base != 0 && overlay_t && g_settings.esp) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+      if (!g_settings.esp) {
+        break;
       }
+
+      // LOCK mutex
+      std::lock_guard<std::mutex> esp_lock(esp_mtx);
+      // esp_mtx.lock();
+      //  Clear players data
+      players.clear();
+
+      // Read local entity and team
+      uint64_t local_ent_ptr = 0;
+      apex_mem.Read<uint64_t>(g_Base + offsets.local_ent, local_ent_ptr);
+      if (local_ent_ptr == 0) {
+        // esp_mtx.unlock();
+        break;
+      }
+      Entity local_player = getEntity(local_ent_ptr);
+      int team_player = local_player.getTeamId();
+      if (team_player < 0 || team_player > 50) {
+        // esp_mtx.unlock();
+        break;
+      }
+
+      // Read matrix for ESP
+      uint64_t viewRenderer = 0;
+      apex_mem.Read<uint64_t>(g_Base + offsets.view_render, viewRenderer);
+      uint64_t viewMatrix = 0;
+      apex_mem.Read<uint64_t>(viewRenderer + offsets.view_matrix, viewMatrix);
+
+      apex_mem.Read<Matrix>(viewMatrix, g_view_matrix);
+
+      Vector local_ent_pos = local_player.getPosition();
+      QAngle local_viewangle = local_player.GetViewAngles();
+
+      // Update local_ent position for ESP
+      g_esp_local_pos = local_ent_pos;
+
+      // Read variable for damage display
+      int var_damage;
+      apex_mem.Read<int>(g_Base + offsets.var_damage, var_damage);
+
+      // Read players
+      uint64_t entitylist = g_Base + offsets.entitylist;
+      for (int i = 0; i < 100; i++) {
+        // Read entity pointer
+        uint64_t centity = 0;
+        apex_mem.Read<uint64_t>(entitylist + ((uint64_t)i << 5), centity);
+        if (centity == 0) {
+          continue;
+        }
+
+        // Exclude undesired entity
+        bool is_player = Entity::isPlayer(centity);
+        if (g_settings.firing_range) {
+          if (!(Entity::isDummy(centity) ||
+                (g_settings.onevone && is_player))) {
+            continue;
+          }
+        } else {
+          if (!is_player) {
+            continue;
+          }
+        }
+
+        // Exclude self
+        if (local_ent_ptr == centity) {
+          continue;
+        }
+
+        // Get entity data
+        Entity Target = getEntity(centity);
+
+        int entity_team = Target.getTeamId();
+
+        // Exclude invalid team
+        if (entity_team < 0 || entity_team > 50) {
+          continue;
+        }
+
+        Vector EntityPosition = Target.getPosition();
+        float dist = local_ent_pos.DistTo(EntityPosition);
+
+        // Excluding targets that are too far or too close
+        if (dist > g_settings.max_dist || dist < 20.0f) {
+          continue;
+        }
+
+        Vector bs = Vector();
+        // Change res to your res here, default is 1080p but can copy paste
+        // 1440p here
+        WorldToScreen(EntityPosition, g_view_matrix.matrix,
+                      g_settings.screen_width, g_settings.screen_height,
+                      bs); // 2560, 1440
+        if (g_settings.esp) {
+          Vector hs = Vector();
+          Vector HeadPosition = Target.getBonePositionByHitbox(0);
+          WorldToScreen(HeadPosition, g_view_matrix.matrix,
+                        g_settings.screen_width, g_settings.screen_height,
+                        hs); // 2560, 1440
+          float height = abs(abs(hs.y) - abs(bs.y));
+          float width = height / 2.0f;
+          float boxMiddle = bs.x - (width / 2.0f);
+          int health = Target.getHealth();
+          int shield = Target.getShield();
+          int maxshield = Target.getMaxshield();
+          int armortype = Target.getArmortype();
+          Vector EntityPosition = Target.getPosition();
+          float targetyaw = Target.GetYaw();
+          if (!lastvis_esp.contains(i)) {
+            lastvis_esp[i] = 0.0f;
+          }
+
+          player data_buf = {dist,
+                             entity_team,
+                             entity_team == team_player,
+                             boxMiddle,
+                             hs.y,
+                             width,
+                             height,
+                             bs.x,
+                             bs.y,
+                             Target.isKnocked(),
+                             (Target.lastVisTime() > lastvis_esp[i]),
+                             health,
+                             shield,
+                             maxshield,
+                             Target.xp_level(),
+                             -99,
+                             armortype,
+                             EntityPosition,
+                             local_ent_pos,
+                             local_viewangle,
+                             targetyaw,
+                             Target.isAlive(),
+                             Target.check_love_player(),
+                             is_spec(Target.ptr)};
+
+          int var_ent_i = 0;
+          apex_mem.Read<int>(Target.ptr + offsets.player_net_var, var_ent_i);
+          uintptr_t var_ptr;
+          apex_mem.Read<uintptr_t>(entitylist + (var_ent_i & 0xffff) * 32,
+                                   var_ptr);
+          apex_mem.Read<int>(var_ptr + (var_damage << 2) + 2968,
+                             data_buf.damage);
+
+          Target.get_name(data_buf.name);
+
+          players.push_back(data_buf);
+          lastvis_esp[i] = Target.lastVisTime();
+        }
+      } // for loop end
+      // esp_mtx.unlock();
     }
   }
   esp_t = false;
@@ -910,7 +989,7 @@ static void AimbotLoop() {
         int held_id;
         apex_mem.Read<int>(LocalPlayer + offsets.off_weapon,
                            held_id); // 0x1a1c
-        aimbot_update_held_id(&aimbot, held_id);
+        aimbot_update_held_id(held_id);
       }
 
       { // Read weapon info
@@ -921,14 +1000,14 @@ static void AimbotLoop() {
         float bullet_grav = current_weapon.get_projectile_gravity();
         float zoom_fov = current_weapon.get_zoom_fov();
         int weapon_mod_bitfield = current_weapon.get_mod_bitfield();
-        aimbot_update_weapon_info(&aimbot, weap_id, bullet_speed, bullet_grav,
-                                  zoom_fov, weapon_mod_bitfield);
+        aimbot_update_weapon_info(weap_id, bullet_speed, bullet_grav, zoom_fov,
+                                  weapon_mod_bitfield);
       }
 
       { // Update aimbot settings
         static int i = 0;
         if (i == 0) {
-          aimbot_settings(&aimbot, &g_settings.aimbot_settings);
+          aimbot_settings(&g_settings.aimbot_settings);
         }
         if (i > 30) { // Lower update frequency to reduce cpu usage
           i = 0;
@@ -937,16 +1016,81 @@ static void AimbotLoop() {
         }
       }
 
-      const auto aimbot_settings = aimbot_get_settings(&aimbot);
-      const auto aim_entity = aimbot_get_aim_entity(&aimbot);
-      const auto weapon_id = aimbot_get_weapon_id(&aimbot);
-      const bool aiming = aimbot_is_aiming(&aimbot);
-      const bool trigger_bot_ready = aimbot_is_triggerbot_ready(&aimbot);
+      const auto aimbot_settings = aimbot_get_settings();
+      const auto aim_entity = aimbot_get_aim_entity();
+      const auto weapon_id = aimbot_get_weapon_id();
+      const bool aiming = aimbot_is_aiming();
+      const bool trigger_bot_ready = aimbot_is_triggerbot_ready();
 
       {
-        int trigger_value = aimbot_poll_trigger_action(&aimbot);
+        int trigger_value = aimbot_poll_trigger_action();
         if (trigger_value) {
           apex_mem.Write<int>(g_Base + offsets.in_attack + 0x8, trigger_value);
+        }
+      }
+
+      // Update Aimbot state
+      aimbot_update(LocalPlayer, g_settings.game_fps);
+
+      aim_angles_t aim_result;
+
+      if (aim_entity == 0) {
+        aim_result = aim_angles_t{false};
+        aimbot_cancel_locking();
+      } else {
+        Entity target = getEntity(aim_entity);
+
+        // show target indicator before aiming
+        aim_target = target.getPosition();
+
+        if (!(aiming || trigger_bot_ready)) {
+          aim_result = aim_angles_t{false};
+        } else if (aimbot_get_gun_safety()) {
+          // printf("safety on\n");
+          aim_result = aim_angles_t{false};
+        } else if (LPlayer.isKnocked() || !target.isAlive() ||
+                   (!g_settings.firing_range && target.isKnocked())) {
+          aim_result = aim_angles_t{false};
+          aimbot_cancel_locking();
+        } else {
+          // Caculate Aim Angles
+
+          /* Fine-tuning for each weapon */
+          if (weapon_id == 2) { // bow
+            // Ctx.BulletSpeed = BulletSpeed - (BulletSpeed*0.08);
+            // Ctx.BulletGravity = BulletGrav + (BulletGrav*0.05);
+            bulletspeed = 10.08;
+            bulletgrav = 10.05;
+          }
+
+          aim_result =
+              CalculateBestBoneAim(LPlayer, target, aimbot_get_state());
+          if (!aim_result.valid) {
+            aimbot_cancel_locking();
+          }
+        }
+      }
+
+      // Update Trigger Bot state
+      int force_attack_state;
+      apex_mem.Read(g_Base + offsets.in_attack + 0x8, force_attack_state);
+      // Ensure that the triggerbot is updated,
+      // otherwise there may be issues with not canceling after firing.
+      aimbot_triggerbot_update(&aim_result, force_attack_state);
+
+      // Aim Assist
+      QAngle aim_angles;
+      if (aiming && aim_result.valid) {
+        auto smoothed_angles =
+            aimbot_smooth_aim_angles(&aim_result, smooth_factor);
+        aim_angles =
+            QAngle(smoothed_angles.x, smoothed_angles.y, smoothed_angles.z);
+      } else {
+        aim_angles = LPlayer.GetViewAngles();
+        if (abs(aim_angles.x) > 360.0f || abs(aim_angles.y) > 360.0f ||
+            abs(aim_angles.z) > 1.0f) {
+          // printf("%f, %f, %f\n", aim_angles.x, aim_angles.y, aim_angles.z);
+          continue;
         }
       }
 
@@ -966,9 +1110,7 @@ static void AimbotLoop() {
                            (aimbot_settings.recoil_smooth_y / 100.f));
 
           // setting viewangles to new angles
-          QAngle new_angles = LPlayer.GetViewAngles() + delta_angle;
-          Math::NormalizeAngles(new_angles);
-          LPlayer.SetViewAngles(new_angles);
+          aim_angles += delta_angle;
         }
 
         // setting old recoil angles to current recoil angles
@@ -977,61 +1119,8 @@ static void AimbotLoop() {
         prev_recoil_angle = QAngle(0, 0, 0);
       }
 
-      // Update Aimbot state
-      aimbot_update(&aimbot, LocalPlayer, g_settings.game_fps);
-
-      aim_angles_t aim_result;
-
-      if (aim_entity == 0) {
-        aim_result = aim_angles_t{false};
-        aimbot_cancel_locking(&aimbot);
-      } else {
-        Entity target = getEntity(aim_entity);
-
-        // show target indicator before aiming
-        aim_target = target.getPosition();
-
-        if (!(aiming || trigger_bot_ready)) {
-          aim_result = aim_angles_t{false};
-        } else if (aimbot_get_gun_safety(&aimbot)) {
-          // printf("safety on\n");
-          aim_result = aim_angles_t{false};
-        } else if (LPlayer.isKnocked() || !target.isAlive() ||
-                   (!g_settings.firing_range && target.isKnocked())) {
-          aim_result = aim_angles_t{false};
-          aimbot_cancel_locking(&aimbot);
-        } else {
-          // Caculate Aim Angles
-
-          /* Fine-tuning for each weapon */
-          if (weapon_id == 2) { // bow
-            // Ctx.BulletSpeed = BulletSpeed - (BulletSpeed*0.08);
-            // Ctx.BulletGravity = BulletGrav + (BulletGrav*0.05);
-            bulletspeed = 10.08;
-            bulletgrav = 10.05;
-          }
-
-          aim_result = CalculateBestBoneAim(LPlayer, target, aimbot);
-          if (!aim_result.valid) {
-            aimbot_cancel_locking(&aimbot);
-          }
-        }
-      }
-
-      // Update Trigger Bot state
-      int force_attack_state;
-      apex_mem.Read(g_Base + offsets.in_attack + 0x8, force_attack_state);
-      // Ensure that the triggerbot is updated,
-      // otherwise there may be issues with not canceling after firing.
-      aimbot_triggerbot_update(&aimbot, &aim_result, force_attack_state);
-
-      // Aim Assist
-      if (aiming && aim_result.valid) {
-        auto smoothed_angles =
-            aimbot_smooth_aim_angles(&aimbot, &aim_result, smooth_factor);
-        LPlayer.SetViewAngles(
-            QAngle(smoothed_angles.x, smoothed_angles.y, smoothed_angles.z));
-      }
+      Math::NormalizeAngles(aim_angles);
+      LPlayer.SetViewAngles(aim_angles);
 
     } // end loop
   }   // end AimbotLoop
@@ -1097,7 +1186,7 @@ static void item_glow_t() {
           TreasureClue &clue = new_treasure_clues[i];
           if (ItemID == new_treasure_clues[i].item_id) {
             Vector position = item.getPosition();
-            float distance = esp_local_pos.DistTo(position);
+            float distance = g_esp_local_pos.DistTo(position);
             if (distance < clue.distance) {
               clue.position = position;
               clue.distance = distance;
@@ -1112,16 +1201,16 @@ static void item_glow_t() {
             125,              // OutlineFunction OutlineFunction
                               // HIGHLIGHT_OUTLINE_LOOT_SCANNED
             64, 64};
-        if (g_settings.loot.lightbackpack && ItemID == 207) {
+        if (g_settings.loot.lightbackpack && ItemID == 219) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.medbackpack && ItemID == 208) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.medbackpack && ItemID == 220) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.heavybackpack && ItemID == 209) {
+        } else if (g_settings.loot.heavybackpack && ItemID == 221) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.goldbackpack && ItemID == 210) {
+        } else if (g_settings.loot.goldbackpack && ItemID == 222) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
         } else if (g_settings.loot.shieldupgrade1 &&
@@ -1130,7 +1219,7 @@ static void item_glow_t() {
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
         } else if (g_settings.loot.shieldupgrade2 &&
                    (ItemID == 322122547394 || ItemID == 21110945375846599)) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.shieldupgrade3 &&
                    (ItemID == 429496729795 || ItemID == 52776987629977800)) {
@@ -1142,28 +1231,27 @@ static void item_glow_t() {
         } else if (g_settings.loot.shieldupgrade5 && ItemID == 536870912201) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.shieldupgradehead1 && ItemID == 188) {
+        } else if (g_settings.loot.shieldupgradehead1 && ItemID == 195) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.shieldupgradehead2 && ItemID == 189) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.shieldupgradehead2 && ItemID == 196) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.shieldupgradehead3 && ItemID == 190) {
+        } else if (g_settings.loot.shieldupgradehead3 && ItemID == 197) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.shieldupgradehead4 && ItemID == 191) {
+        } else if (g_settings.loot.shieldupgradehead4 && ItemID == 198) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.accelerant && ItemID == 182) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.accelerant && ItemID == 189) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.phoenix && ItemID == 183) {
+        } else if (g_settings.loot.phoenix && ItemID == 190) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
         } else if (g_settings.loot.skull &&
-                   strstr(
-                       glowName,
-                       "mdl/Weapons/skull_grenade/skull_grenade_base_v.rmdl")) {
+                   strstr(glowName, xorstr_("mdl/Weapons/skull_grenade/"
+                                            "skull_grenade_base_v.rmdl"))) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
         } else if (item.isBox() && g_settings.deathbox) {
@@ -1182,11 +1270,10 @@ static void item_glow_t() {
               64, 64};
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightMode, highlightParameter, 67);
-        } else if (
-            strstr(
-                glowName,
-                "mdl/props/caustic_gas_tank/caustic_gas_tank.rmdl")) { // Gas
-                                                                       // Trap
+        } else if (strstr(glowName,
+                          xorstr_("mdl/props/caustic_gas_tank/"
+                                  "caustic_gas_tank.rmdl"))) { // Gas
+                                                               // Trap
           std::array<unsigned char, 4> highlightMode = {
               0,   // InsideFunction  HIGHLIGHT_FILL_LOOT_SCANNED
               125, // OutlineFunction OutlineFunction
@@ -1194,25 +1281,25 @@ static void item_glow_t() {
               64, 64};
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightMode, highlightParameter, 67);
-        } else if (g_settings.loot.healthlarge && ItemID == 184) {
+        } else if (g_settings.loot.healthlarge && ItemID == 191) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.healthsmall && ItemID == 185) {
+        } else if (g_settings.loot.healthsmall && ItemID == 192) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.shieldbattsmall && ItemID == 187) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.shieldbattsmall && ItemID == 194) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.shieldbattlarge && ItemID == 186) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.shieldbattlarge && ItemID == 193) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.sniperammo && ItemID == 144) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.heavyammo && ItemID == 143) {
           std::array<float, 3> highlightParameter = {0, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 65);
-        } else if (g_settings.loot.optic1xhcog && ItemID == 215) {
+        } else if (g_settings.loot.optic1xhcog && ItemID == 227) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
         } else if (g_settings.loot.lightammo && ItemID == 140) {
@@ -1224,173 +1311,173 @@ static void item_glow_t() {
         } else if (g_settings.loot.shotgunammo && ItemID == 142) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.lasersight1 && ItemID == 229) {
+        } else if (g_settings.loot.lasersight1 && ItemID == 241) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.lasersight2 && ItemID == 230) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.lasersight2 && ItemID == 242) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.lasersight3 && ItemID == 231) {
+        } else if (g_settings.loot.lasersight3 && ItemID == 243) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.sniperammomag1 && ItemID == 244) {
+        } else if (g_settings.loot.sniperammomag1 && ItemID == 256) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.sniperammomag2 && ItemID == 245) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.sniperammomag2 && ItemID == 257) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.sniperammomag3 && ItemID == 246) {
+        } else if (g_settings.loot.sniperammomag3 && ItemID == 258) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.sniperammomag4 && ItemID == 247) {
+        } else if (g_settings.loot.sniperammomag4 && ItemID == 259) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.energyammomag1 && ItemID == 240) {
+        } else if (g_settings.loot.energyammomag1 && ItemID == 252) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.energyammomag2 && ItemID == 241) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.energyammomag2 && ItemID == 253) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.energyammomag3 && ItemID == 242) {
+        } else if (g_settings.loot.energyammomag3 && ItemID == 254) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.energyammomag4 && ItemID == 243) {
+        } else if (g_settings.loot.energyammomag4 && ItemID == 255) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.stocksniper1 && ItemID == 255) {
+        } else if (g_settings.loot.stocksniper1 && ItemID == 267) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.stocksniper2 && ItemID == 256) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.stocksniper2 && ItemID == 268) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.stocksniper3 && ItemID == 257) {
+        } else if (g_settings.loot.stocksniper3 && ItemID == 269) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.stockregular1 && ItemID == 252) {
+        } else if (g_settings.loot.stockregular1 && ItemID == 264) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.stockregular2 && ItemID == 253) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.stockregular2 && ItemID == 265) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.stockregular3 && ItemID == 254) {
+        } else if (g_settings.loot.stockregular3 && ItemID == 266) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.shielddown1 && ItemID == 203) {
+        } else if (g_settings.loot.shielddown1 && ItemID == 215) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.shielddown2 && ItemID == 204) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.shielddown2 && ItemID == 216) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.shielddown3 && ItemID == 205) {
+        } else if (g_settings.loot.shielddown3 && ItemID == 217) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.shielddown4 && ItemID == 206) {
+        } else if (g_settings.loot.shielddown4 && ItemID == 218) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.lightammomag1 && ItemID == 232) {
+        } else if (g_settings.loot.lightammomag1 && ItemID == 244) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.lightammomag2 && ItemID == 233) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.lightammomag2 && ItemID == 245) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.lightammomag3 && ItemID == 234) {
+        } else if (g_settings.loot.lightammomag3 && ItemID == 246) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.lightammomag4 && ItemID == 235) {
+        } else if (g_settings.loot.lightammomag4 && ItemID == 247) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.heavyammomag1 && ItemID == 236) {
+        } else if (g_settings.loot.heavyammomag1 && ItemID == 248) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.heavyammomag2 && ItemID == 237) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.heavyammomag2 && ItemID == 249) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.heavyammomag3 && ItemID == 238) {
+        } else if (g_settings.loot.heavyammomag3 && ItemID == 250) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.heavyammomag4 && ItemID == 239) {
+        } else if (g_settings.loot.heavyammomag4 && ItemID == 251) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.optic2xhcog && ItemID == 216) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.optic2xhcog && ItemID == 228) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.opticholo1x && ItemID == 217) {
+        } else if (g_settings.loot.opticholo1x && ItemID == 229) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.opticholo1x2x && ItemID == 218) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.opticholo1x2x && ItemID == 230) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.opticthreat && ItemID == 219) {
+        } else if (g_settings.loot.opticthreat && ItemID == 231) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.optic3xhcog && ItemID == 220) {
+        } else if (g_settings.loot.optic3xhcog && ItemID == 232) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.optic2x4x && ItemID == 221) {
+        } else if (g_settings.loot.optic2x4x && ItemID == 233) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.opticsniper6x && ItemID == 222) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.opticsniper6x && ItemID == 234) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.opticsniper4x8x && ItemID == 223) {
+        } else if (g_settings.loot.opticsniper4x8x && ItemID == 235) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.opticsniperthreat && ItemID == 224) {
+        } else if (g_settings.loot.opticsniperthreat && ItemID == 236) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.suppressor1 && ItemID == 225) {
+        } else if (g_settings.loot.suppressor1 && ItemID == 237) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.suppressor2 && ItemID == 226) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.suppressor2 && ItemID == 238) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.suppressor3 && ItemID == 227) {
+        } else if (g_settings.loot.suppressor3 && ItemID == 239) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.turbo_charger && ItemID == 258) {
+        } else if (g_settings.loot.turbo_charger && ItemID == 270) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.skull_piecer && ItemID == 260) {
+        } else if (g_settings.loot.skull_piecer && ItemID == 272) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.hammer_point && ItemID == 263) {
+        } else if (g_settings.loot.hammer_point && ItemID == 276) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.disruptor_rounds && ItemID == 262) {
+        } else if (g_settings.loot.disruptor_rounds && ItemID == 275) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
         } else if (g_settings.loot.boosted_loader && ItemID == 272) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
-        } else if (g_settings.loot.shotgunbolt1 && ItemID == 248) {
+        } else if (g_settings.loot.shotgunbolt1 && ItemID == 260) {
           std::array<float, 3> highlightParameter = {1, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 72);
-        } else if (g_settings.loot.shotgunbolt2 && ItemID == 249) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.shotgunbolt2 && ItemID == 261) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
-        } else if (g_settings.loot.shotgunbolt3 && ItemID == 250) {
+        } else if (g_settings.loot.shotgunbolt3 && ItemID == 262) {
           std::array<float, 3> highlightParameter = {0.2941, 0, 0.5098};
           item.enableGlow(highlightFunctionBits, highlightParameter, 74);
-        } else if (g_settings.loot.shotgunbolt4 && ItemID == 251) {
+        } else if (g_settings.loot.shotgunbolt4 && ItemID == 263) {
           std::array<float, 3> highlightParameter = {1, 0.8431, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 75);
         }
         // Nades
-        else if (g_settings.loot.grenade_frag && ItemID == 213) {
+        else if (g_settings.loot.grenade_frag && ItemID == 225) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.grenade_thermite && ItemID == 212) {
+        } else if (g_settings.loot.grenade_thermite && ItemID == 224) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.grenade_arc_star && ItemID == 214) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+        } else if (g_settings.loot.grenade_arc_star && ItemID == 226) {
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 70);
         }
         // Weapons
         else if (g_settings.loot.weapon_kraber && ItemID == 1) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.weapon_mastiff && ItemID == 3) {
+        } else if (g_settings.loot.weapon_mastiff && ItemID == 2) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
         } else if (g_settings.loot.weapon_lstar && ItemID == 7) {
@@ -1423,17 +1510,17 @@ static void item_glow_t() {
         } else if (g_settings.loot.weapon_r99 && ItemID == 49) {
           std::array<float, 3> highlightParameter = {1, 0.5490, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 66);
-        } else if (g_settings.loot.weapon_prowler && ItemID == 56) {
+        } else if (g_settings.loot.weapon_prowler && ItemID == 54) {
           std::array<float, 3> highlightParameter = {0, 1, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 65);
         } else if (g_settings.loot.weapon_volt && ItemID == 60) {
           std::array<float, 3> highlightParameter = {0.2, 1, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 73);
         } else if (g_settings.loot.weapon_longbow && ItemID == 65) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.weapon_charge_rifle && ItemID == 70) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.weapon_spitfire && ItemID == 75) {
           std::array<float, 3> highlightParameter = {1, 0.5490, 0};
@@ -1441,17 +1528,17 @@ static void item_glow_t() {
         } else if (g_settings.loot.weapon_r301 && ItemID == 80) {
           std::array<float, 3> highlightParameter = {1, 0.5490, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 66);
-        } else if (g_settings.loot.weapon_eva8 && ItemID == 85) {
+        } else if (g_settings.loot.weapon_eva8 && ItemID == 86) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.weapon_peacekeeper && ItemID == 90) {
+        } else if (g_settings.loot.weapon_peacekeeper && ItemID == 91) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
-        } else if (g_settings.loot.weapon_mozambique && ItemID == 95) {
+        } else if (g_settings.loot.weapon_mozambique && ItemID == 96) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 67);
         } else if (g_settings.loot.weapon_wingman && ItemID == 106) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.weapon_p2020 && ItemID == 111) {
           std::array<float, 3> highlightParameter = {1, 0.5490, 0};
@@ -1460,7 +1547,7 @@ static void item_glow_t() {
           std::array<float, 3> highlightParameter = {1, 0.5490, 0};
           item.enableGlow(highlightFunctionBits, highlightParameter, 66);
         } else if (g_settings.loot.weapon_sentinel && ItemID == 122) {
-          std::array<float, 3> highlightParameter = {0, 0, 1};
+          std::array<float, 3> highlightParameter = {0, 0.7490, 1};
           item.enableGlow(highlightFunctionBits, highlightParameter, 69);
         } else if (g_settings.loot.weapon_bow && ItemID == 127) {
           std::array<float, 3> highlightParameter = {1, 0, 0};
@@ -1496,9 +1583,9 @@ void terminal() {
 
 int main(int argc, char *argv[]) {
   load_settings();
-  aimbot = aimbot_new();
 
-  if (geteuid() != 0) {
+  // memflow-kvm available or run as root
+  if (geteuid() != 0 && access(xorstr_("/dev/memflow"), F_OK) == -1) {
     // run as root..
     print_run_as_root();
 
@@ -1506,8 +1593,6 @@ int main(int argc, char *argv[]) {
     run_tui_menu();
     return 0;
   }
-
-  const char *ap_proc = "r5apex.exe";
 
   std::thread aimbot_thr;
   std::thread esp_thr;
@@ -1546,15 +1631,15 @@ int main(int argc, char *argv[]) {
         control_thr.~thread();
       }
 
-      std::this_thread::sleep_for(std::chrono::seconds(1));
-      printf("Searching for apex process...\n");
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      printf("%s", xorstr_("Searching for apex process...\n"));
 
-      apex_mem.open_proc(ap_proc);
+      apex_mem.open_proc(xorstr_("r5apex.exe"));
 
       if (apex_mem.get_proc_status() == process_status::FOUND_READY) {
         g_Base = apex_mem.get_proc_baseaddr();
-        printf("\nApex process found\n");
-        printf("Base: %lx\n", g_Base);
+        printf("%s", xorstr_("\nApex process found\n"));
+        printf("%s%lx%s", xorstr_("Base: "), g_Base, xorstr_("\n"));
 
         aimbot_thr = std::thread(AimbotLoop);
         esp_thr = std::thread(EspLoop);
@@ -1600,3 +1685,5 @@ int main(int argc, char *argv[]) {
 
   return 0;
 }
+
+
